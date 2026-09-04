@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ORGANIZER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  name          String
+  role          Role      @default(CUSTOMER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  venues        Venue[]       // If role is ADMIN, they might manage venues (optional relation)
+  events        Event[]       // If role is ORGANIZER, they own events
+  bookings      Booking[]     // If role is CUSTOMER, they own bookings
+  seatHolds     SeatHold[]    // Temporary holds by customer
+  waitlist      Waitlist[]    // Waitlist entries by customer
+}
+
+model Venue {
+  id          String   @id @default(uuid())
+  name        String
+  location    String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  adminId     String
+  admin       User     @relation(fields: [adminId], references: [id])
+  categories  SeatCategory[]
+  seats       Seat[]
+  events      Event[]
+}
+
+model SeatCategory {
+  id        String   @id @default(uuid())
+  name      String   // e.g. VIP, Regular, Balcony
+  venueId   String
+  venue     Venue    @relation(fields: [venueId], references: [id])
+  
+  seats     Seat[]
+  eventPrices EventPricing[]
+  waitlists   Waitlist[]
+}
+
+model Seat {
+  id          String       @id @default(uuid())
+  row         String
+  number      String
+  venueId     String
+  categoryId  String
+  
+  venue       Venue        @relation(fields: [venueId], references: [id])
+  category    SeatCategory @relation(fields: [categoryId], references: [id])
+
+  bookingSeats BookingSeat[]
+  seatHolds    SeatHold[]
+
+  @@unique([venueId, row, number])
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  COMPLETED
+  CANCELLED
+}
+
+model Event {
+  id          String      @id @default(uuid())
+  title       String
+  description String
+  startTime   DateTime
+  endTime     DateTime
+  status      EventStatus @default(DRAFT)
+  organizerId String
+  venueId     String
+  
+  organizer   User        @relation(fields: [organizerId], references: [id])
+  venue       Venue       @relation(fields: [venueId], references: [id])
+
+  pricing     EventPricing[]
+  bookings    Booking[]
+  seatHolds   SeatHold[]
+  waitlists   Waitlist[]
+}
+
+model EventPricing {
+  id          String       @id @default(uuid())
+  eventId     String
+  categoryId  String
+  price       Decimal      @db.Decimal(10, 2)
+  
+  event       Event        @relation(fields: [eventId], references: [id])
+  category    SeatCategory @relation(fields: [categoryId], references: [id])
+
+  @@unique([eventId, categoryId])
+}
+
+// Replaces Redis TTL Holds. Uses expiresAt for cleanup and status checking.
+model SeatHold {
+  id          String   @id @default(uuid())
+  eventId     String
+  seatId      String
+  customerId  String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime // TTL implementation in Postgres
+  
+  event       Event    @relation(fields: [eventId], references: [id])
+  seat        Seat     @relation(fields: [seatId], references: [id])
+  customer    User     @relation(fields: [customerId], references: [id])
+
+  // Prevents same seat in same event being held twice simultaneously
+  @@unique([eventId, seatId]) 
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+model Booking {
+  id             String        @id @default(uuid())
+  eventId        String
+  customerId     String
+  status         BookingStatus @default(CONFIRMED)
+  totalAmount    Decimal       @db.Decimal(10, 2)
+  qrToken        String        @unique @default(uuid()) // Used for secure validation
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  event          Event         @relation(fields: [eventId], references: [id])
+  customer       User          @relation(fields: [customerId], references: [id])
+  bookingSeats   BookingSeat[]
+}
+
+model BookingSeat {
+  id             String   @id @default(uuid())
+  bookingId      String
+  seatId         String
+  priceAtBooking Decimal  @db.Decimal(10, 2)
+  
+  booking        Booking  @relation(fields: [bookingId], references: [id])
+  seat           Seat     @relation(fields: [seatId], references: [id])
+
+  // Concurrency lock: Prevents the same seat from being booked twice for the same event
+  // We will need a way to scope this by Event. 
+  // Since seatId is unique globally and linked to a venue, the unique constraint ensures a seat is booked only once.
+  // Wait, a seat can be booked multiple times across DIFFERENT events at the same venue.
+  // So we need to ensure (eventId, seatId) is unique across all CONFIRMED bookings.
+  // We can enforce this by including eventId in BookingSeat or relying on transaction logic.
+  // We'll add eventId here for strict database constraint integrity.
+  eventId        String
+  
+  @@unique([eventId, seatId])
+}
+
+enum WaitlistStatus {
+  WAITING
+  OFFERED
+  BOOKED
+  EXPIRED
+}
+
+model Waitlist {
+  id             String         @id @default(uuid())
+  eventId        String
+  categoryId     String
+  customerId     String
+  status         WaitlistStatus @default(WAITING)
+  createdAt      DateTime       @default(now())
+  offerExpiresAt DateTime?      // Set when transitioning to OFFERED
+
+  event          Event          @relation(fields: [eventId], references: [id])
+  category       SeatCategory   @relation(fields: [categoryId], references: [id])
+  customer       User           @relation(fields: [customerId], references: [id])
+}
